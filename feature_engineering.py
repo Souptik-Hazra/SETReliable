@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 GROUP = "MEDICINE_HOSPITAL_ID"
+DEFAULT_LAGS = (1, 2, 3, 6, 12)
 
 
 def add_time_features(df):
@@ -14,22 +15,22 @@ def add_time_features(df):
     return out
 
 
-def add_target_features(df, target, lags=(1, 2, 3), window=3):
+def add_target_features(df, target, lags=DEFAULT_LAGS, windows=(3, 6)):
+    """Create strictly past-only features; missing source months stay missing."""
     if target not in df:
         raise ValueError(f"Target column not found: {target}")
     out = df.sort_values([GROUP, "DATE"]).copy()
-    grouped = out.groupby(GROUP)[target]
+    grouped = out.groupby(GROUP, sort=False)[target]
     for lag in lags:
         out[f"{target}_LAG_{lag}"] = grouped.shift(lag)
-    out[f"{target}_ROLLING_MEAN_{window}M"] = grouped.transform(
-        lambda x: x.shift(1).rolling(window, min_periods=1).mean()
-    )
-    out[f"{target}_ROLLING_STD_{window}M"] = grouped.transform(
-        lambda x: x.shift(1).rolling(window, min_periods=2).std()
-    )
-    out[f"{target}_ROLLING_MAX_{window}M"] = grouped.transform(
-        lambda x: x.shift(1).rolling(window, min_periods=1).max()
-    )
+    for window in windows:
+        prior = grouped.shift(1)
+        out[f"{target}_ROLLING_MEAN_{window}M"] = prior.groupby(out[GROUP]).transform(
+            lambda x: x.rolling(window, min_periods=1).mean())
+        out[f"{target}_ROLLING_STD_{window}M"] = prior.groupby(out[GROUP]).transform(
+            lambda x: x.rolling(window, min_periods=2).std())
+        out[f"{target}_ROLLING_MAX_{window}M"] = prior.groupby(out[GROUP]).transform(
+            lambda x: x.rolling(window, min_periods=1).max())
     return out
 
 
@@ -51,7 +52,7 @@ def add_intermittent_flag(df, target, zero_threshold=0.30):
 
 
 def assign_clinical_priority(df, ven_mapping=None):
-    """VEN labels require a separately verified clinical mapping."""
+    """Never infer clinical criticality from a medicine-code hash."""
     out = df.copy()
     if ven_mapping is None:
         out["VEN_CLASS"] = "UNCLASSIFIED"
@@ -61,9 +62,10 @@ def assign_clinical_priority(df, ven_mapping=None):
     required = {"VMP_SNOMED_CODE", "VEN_CLASS"}
     if not required.issubset(ven_mapping.columns):
         raise ValueError(f"VEN mapping must contain {sorted(required)}")
-    mapping = ven_mapping[["VMP_SNOMED_CODE", "VEN_CLASS"]].drop_duplicates()
+    mapping = ven_mapping[[c for c in (
+        "VMP_SNOMED_CODE", "VEN_CLASS", "SUBSTITUTABLE", "CLINICAL_IMPACT_WEIGHT"
+    ) if c in ven_mapping.columns]].drop_duplicates()
     if mapping["VMP_SNOMED_CODE"].duplicated().any():
         raise ValueError("VEN mapping must contain at most one row per VMP_SNOMED_CODE")
-    out = out.merge(mapping, on="VMP_SNOMED_CODE", how="left")
-    out["VEN_CLASS"] = out["VEN_CLASS"].fillna("UNCLASSIFIED")
-    return out
+    return out.merge(mapping, on="VMP_SNOMED_CODE", how="left").assign(
+        VEN_CLASS=lambda x: x["VEN_CLASS"].fillna("UNCLASSIFIED"))
