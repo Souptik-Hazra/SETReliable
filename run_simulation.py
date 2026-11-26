@@ -23,14 +23,28 @@ from inventory_simulation import (
 from reliability_monitoring import add_reliability_columns
 
 
+def validate_simulation(result):
+    required = {
+        "DEMAND_SCENARIO", "INVENTORY_ON_HAND", "AVAILABLE_SUPPLY",
+        "ORDER_QUANTITY", "INCOMING_ORDER", "SHORTAGE_QUANTITY",
+    }
+    missing = required.difference(result.columns)
+    if missing:
+        raise ValueError(f"Simulation output missing columns: {sorted(missing)}")
+    numeric = result[list(required - {"DEMAND_SCENARIO"})]
+    if (numeric.select_dtypes(include="number") < -1e-9).any().any():
+        raise ValueError("Simulation produced negative inventory/order/shortage values")
+    if not result["INVENTORY_ON_HAND"].notna().all():
+        raise ValueError("Inventory contains unexpected missing values")
+    return result
+
+
 def prepare_base_data():
-    print("Loading NHSBSA secondary-care medicines dataset...")
+    print("Loading and aggregating NHSBSA secondary-care medicines dataset...")
     raw = load_raw_data()
-    print(f"Monthly medicine-Trust-unit observations: {len(raw):,}")
-
+    print(f"Aggregated medicine-Trust-unit-month rows: {len(raw):,}")
     eligible = filter_series(raw)
-    print(f"Eligible series observations: {len(eligible):,}")
-
+    print(f"Eligible rows after valid-demand history filter: {len(eligible):,}")
     monthly = create_continuous_monthly_series(eligible)
     monthly = add_time_features(monthly)
     monthly = add_lag_features(monthly)
@@ -50,10 +64,10 @@ def prepare_base_data():
     monthly = add_reliability_columns(
         monthly, window=ROLLING_WINDOW, nominal_coverage=NOMINAL_COVERAGE
     )
-    return monthly
+    return validate_simulation(monthly)
 
 
-def _run_scenario(base_df, scenario_name, scenario_df):
+def _run_scenario(scenario_name, scenario_df):
     result = simulate_inventory(
         scenario_df,
         target_stock_multiplier=TARGET_STOCK_MULTIPLIER,
@@ -62,6 +76,7 @@ def _run_scenario(base_df, scenario_name, scenario_df):
     result = add_reliability_columns(
         result, window=ROLLING_WINDOW, nominal_coverage=NOMINAL_COVERAGE
     )
+    validate_simulation(result)
     output = OUTPUT_DIR / f"{scenario_name.lower()}.csv"
     result.to_csv(output, index=False)
 
@@ -73,6 +88,8 @@ def _run_scenario(base_df, scenario_name, scenario_df):
         "stockout_rate": float(result.loc[observed, "STOCKOUT_EVENT"].mean())
             if observed.any() else float("nan"),
         "total_shortage_quantity_native_units": float(result["SHORTAGE_QUANTITY"].sum()),
+        "risk_alert_rate": float(result.loc[observed, "RISK_ALERT"].mean())
+            if observed.any() else float("nan"),
         "output_file": str(output),
     }
     return summary
@@ -85,28 +102,33 @@ def main():
     print(f"Saved baseline: {OUTPUT_BASE_FILE}")
 
     summaries = []
+    scenarios = []
     for factor in ABRUPT_SURGE_FACTORS:
-        scenario = create_abrupt_surge_scenario(
-            base, surge_factor=factor, surge_months=ABRUPT_SURGE_MONTHS
-        )
-        summaries.append(_run_scenario(base, f"ABRUPT_SURGE_{factor}", scenario))
-
+        scenarios.append((
+            f"ABRUPT_SURGE_{factor}",
+            create_abrupt_surge_scenario(
+                base, surge_factor=factor, surge_months=ABRUPT_SURGE_MONTHS
+            ),
+        ))
     for increase in GRADUAL_DRIFT_TOTAL_INCREASES:
-        scenario = create_gradual_drift_scenario(
-            base, total_increase=increase, drift_months=GRADUAL_DRIFT_MONTHS
-        )
-        summaries.append(_run_scenario(base, f"GRADUAL_DRIFT_{increase}", scenario))
-
+        scenarios.append((
+            f"GRADUAL_DRIFT_{increase}",
+            create_gradual_drift_scenario(
+                base, total_increase=increase, drift_months=GRADUAL_DRIFT_MONTHS
+            ),
+        ))
     for multiplier in VOLATILITY_MULTIPLIERS:
-        scenario = create_volatility_scenario(
-            base, volatility_multiplier=multiplier
-        )
-        summaries.append(_run_scenario(base, f"VOLATILITY_{multiplier}", scenario))
+        scenarios.append((
+            f"VOLATILITY_{multiplier}",
+            create_volatility_scenario(base, volatility_multiplier=multiplier),
+        ))
 
-    summary = pd.DataFrame(summaries)
-    summary.to_csv(OUTPUT_SUMMARY_FILE, index=False)
+    for name, scenario in scenarios:
+        summaries.append(_run_scenario(name, scenario))
+
+    pd.DataFrame(summaries).to_csv(OUTPUT_SUMMARY_FILE, index=False)
     print(f"Saved scenario summary: {OUTPUT_SUMMARY_FILE}")
-    print("Simulation completed.")
+    print("Simulation completed. Scenario outputs are synthetic stress tests, not observed outcomes.")
 
 
 if __name__ == "__main__":
