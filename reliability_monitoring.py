@@ -33,11 +33,7 @@ def _drift_flags(residuals, window=6, threshold=2.0):
 
 def add_reliability_columns(df, target="GROSS_POSITIVE_QUANTITY",
                             window=6, nominal_coverage=0.90):
-    """Evaluate a one-month-naive baseline using only prior observations.
-
-    Intervals are formed from prior absolute residuals; the row's error is never
-    used to construct its own interval. This is a baseline, not a trained model.
-    """
+    """Evaluate a one-month-naive baseline using only prior observations."""
     if target not in df:
         raise ValueError(f"Target column not found: {target}")
     if window < 2 or not 0 < nominal_coverage < 1:
@@ -50,9 +46,10 @@ def add_reliability_columns(df, target="GROSS_POSITIVE_QUANTITY",
         forecast = pd.Series(actual).shift(1).to_numpy()
         residual = actual - forecast
         prior_errors = pd.Series(np.abs(residual)).shift(1)
-        radius = prior_errors.rolling(window, min_periods=3).quantile(nominal_coverage).to_numpy()
-        lower = forecast - radius
-        upper = forecast + radius
+        radius = prior_errors.rolling(
+            window, min_periods=min(3, window)
+        ).quantile(nominal_coverage).to_numpy()
+        lower, upper = forecast - radius, forecast + radius
         valid = np.isfinite(actual) & np.isfinite(forecast)
         absolute_error = np.where(valid, np.abs(residual), np.nan)
         signed_error = np.where(valid, residual, np.nan)
@@ -70,8 +67,10 @@ def add_reliability_columns(df, target="GROSS_POSITIVE_QUANTITY",
         mae_score = _past_scale(rolling_mae)
         bias_score = _past_scale(rolling_bias)
         calibration_score = np.nan_to_num(np.maximum(0, nominal_coverage - coverage), nan=0.0)
-        score = np.clip(0.35 * mae_score + 0.25 * bias_score +
-                        0.25 * calibration_score + 0.15 * drift, 0, 1)
+        score = np.clip(
+            0.35 * mae_score + 0.25 * bias_score + 0.25 * calibration_score + 0.15 * drift,
+            0, 1,
+        )
 
         group["FORECAST_TARGET"] = target
         group["BASELINE_FORECAST"] = forecast
