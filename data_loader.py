@@ -19,12 +19,7 @@ def _clean_text(series):
 
 
 def load_raw_data(path=INPUT_FILE, chunksize=None, memory_limit="4GB"):
-    """Out-of-core aggregation for the current pre-June-2026 SCMD CSV.
-
-    DuckDB performs the global group-by on disk and can spill intermediate
-    state to its temporary directory. Only the aggregated monthly result is
-    materialised as a pandas DataFrame.
-    """
+    """Out-of-core aggregation for the current pre-June-2026 SCMD CSV."""
     source = str(path).replace("'", "''")
     header = pd.read_csv(path, nrows=0)
     missing = sorted(set(REQUIRED_COLUMNS) - set(header.columns))
@@ -34,7 +29,7 @@ def load_raw_data(path=INPUT_FILE, chunksize=None, memory_limit="4GB"):
     conn = duckdb.connect(database=":memory:")
     try:
         conn.execute(f"SET memory_limit = '{memory_limit}'")
-        conn.execute("""
+        conn.execute(f"""
             CREATE TEMP VIEW scmd_source AS
             SELECT
                 trim(YEAR_MONTH) AS YEAR_MONTH,
@@ -65,7 +60,7 @@ def load_raw_data(path=INPUT_FILE, chunksize=None, memory_limit="4GB"):
 
         data = conn.execute("""
             SELECT
-                DATE, ODS_CODE, VMP_SNOMED_CODE AS VMP_SNOMED_CODE,
+                DATE, ODS_CODE, VMP_SNOMED_CODE,
                 UNIT_OF_MEASURE_IDENTIFIER,
                 coalesce(sum(QUANTITY) FILTER (WHERE QUANTITY > 0), 0.0) AS GROSS_POSITIVE_QUANTITY,
                 coalesce(sum(QUANTITY) FILTER (WHERE QUANTITY < 0), 0.0) AS NEGATIVE_QUANTITY_TOTAL,

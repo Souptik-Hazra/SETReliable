@@ -152,6 +152,20 @@ def test_duplicate_audit_detects_within_and_across_chunks(tmp_path):
     duplicate = frame.iloc[[0]].copy()
     data = pd.concat([frame, duplicate, frame.iloc[[1]]], ignore_index=True)
     data.to_csv(path, index=False)
-    result = audit(path, chunksize=2, sqlite_path=tmp_path / "audit.sqlite")
+    result = audit(path, chunksize=2)
     assert result["exact_duplicate_rows"] >= 2
     assert result["duplicate_series_month_keys"] >= 3
+
+
+def test_loader_rejects_missing_required_schema(tmp_path):
+    path = tmp_path / "invalid.csv"
+    pd.DataFrame({"YEAR_MONTH": ["202501"]}).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="missing required columns"):
+        load_raw_data(path)
+
+
+def test_audit_rejects_missing_required_schema(tmp_path):
+    path = tmp_path / "invalid.csv"
+    pd.DataFrame({"YEAR_MONTH": ["202501"]}).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="Missing required columns"):
+        audit(path)
