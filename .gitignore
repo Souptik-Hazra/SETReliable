@@ -1,3 +1,17 @@
-# Ignore local datasets and project files
+# Local source datasets and generated outputs
+/dataset/
 /data/
-/SET PROJECT/
+/outputs/
+/data_quality_reports/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments and local configuration
+.venv/
+venv/
+.env

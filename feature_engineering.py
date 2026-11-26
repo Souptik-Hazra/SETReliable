@@ -2,147 +2,67 @@ import numpy as np
 import pandas as pd
 
 
+GROUP = "MEDICINE_HOSPITAL_ID"
+
+
 def add_time_features(df):
     df = df.copy()
-
     df["YEAR"] = df["DATE"].dt.year
     df["MONTH"] = df["DATE"].dt.month
     df["QUARTER"] = df["DATE"].dt.quarter
-
+    df["MONTH_SIN"] = np.sin(2 * np.pi * df["MONTH"] / 12)
+    df["MONTH_COS"] = np.cos(2 * np.pi * df["MONTH"] / 12)
     return df
 
 
 def add_lag_features(df, lags=(1, 2, 3)):
-    df = df.copy()
-    df = df.sort_values(
-        by=["MEDICINE_HOSPITAL_ID", "DATE"]
-    )
-
+    df = df.sort_values([GROUP, "DATE"]).copy()
     for lag in lags:
-        df[f"DEMAND_LAG_{lag}"] = (
-            df.groupby("MEDICINE_HOSPITAL_ID")["DEMAND"]
-            .shift(lag)
-        )
-
+        df[f"DEMAND_LAG_{lag}"] = df.groupby(GROUP)["DEMAND"].shift(lag)
     return df
 
 
 def add_rolling_features(df, window=3):
-    df = df.copy()
-    df = df.sort_values(
-        by=["MEDICINE_HOSPITAL_ID", "DATE"]
+    df = df.sort_values([GROUP, "DATE"]).copy()
+    grouped = df.groupby(GROUP)["DEMAND"]
+    df["ROLLING_MEAN_3M"] = grouped.transform(
+        lambda x: x.shift(1).rolling(window, min_periods=1).mean()
     )
-
-    grouped = df.groupby("MEDICINE_HOSPITAL_ID")["DEMAND"]
-
-    df["ROLLING_MEAN_3M"] = (
-        grouped
-        .transform(lambda x: x.shift(1).rolling(window, min_periods=1).mean())
+    df["ROLLING_STD_3M"] = grouped.transform(
+        lambda x: x.shift(1).rolling(window, min_periods=2).std()
     )
-
-    df["ROLLING_STD_3M"] = (
-        grouped
-        .transform(lambda x: x.shift(1).rolling(window, min_periods=2).std())
+    df["ROLLING_MAX_3M"] = grouped.transform(
+        lambda x: x.shift(1).rolling(window, min_periods=1).max()
     )
-
-    df["ROLLING_MAX_3M"] = (
-        grouped
-        .transform(lambda x: x.shift(1).rolling(window, min_periods=1).max())
-    )
-
     return df
 
 
 def add_intermittent_flag(df, zero_threshold=0.30):
     df = df.copy()
-
-    zero_share = (
-        df.groupby("MEDICINE_HOSPITAL_ID")["DEMAND"]
-        .apply(lambda x: (x == 0).mean())
-        .reset_index(name="ZERO_DEMAND_SHARE")
-    )
-
-    zero_share["IS_INTERMITTENT"] = (
-        zero_share["ZERO_DEMAND_SHARE"] >= zero_threshold
-    ).astype(int)
-
-    df = df.merge(
-        zero_share,
-        on="MEDICINE_HOSPITAL_ID",
-        how="left",
-    )
-
-    return df
+    summary = df.groupby(GROUP)["DEMAND"].agg(
+        ZERO_DEMAND_SHARE=lambda x: x.eq(0).sum() / max(x.notna().sum(), 1),
+        OBSERVED_MONTHS="count",
+    ).reset_index()
+    summary["IS_INTERMITTENT"] = (
+        summary["ZERO_DEMAND_SHARE"] >= zero_threshold
+    ).astype("int8")
+    return df.merge(summary, on=GROUP, how="left")
 
 
-def assign_clinical_priority(df):
-    """
-    Placeholder assignment.
-
-    Replace this with a real medicine-level VEN mapping if available.
-    For initial experimentation, assign priority using a deterministic hash
-    so that results are reproducible.
-    """
-
+def assign_clinical_priority(df, ven_mapping=None):
+    """Only assign VEN from an externally verified mapping; never fabricate it."""
     df = df.copy()
+    if ven_mapping is None:
+        df["VEN_CLASS"] = "UNCLASSIFIED"
+        df["SUBSTITUTABLE"] = pd.NA
+        df["CLINICAL_IMPACT_WEIGHT"] = np.nan
+        return df
 
-    unique_medicines = (
-        df[["VMP_SNOMED_CODE"]]
-        .drop_duplicates()
-        .reset_index(drop=True)
-    )
+    required = {"VMP_SNOMED_CODE", "VEN_CLASS"}
+    if not required.issubset(ven_mapping.columns):
+        raise ValueError(f"VEN mapping must contain {sorted(required)}")
 
-    unique_medicines["HASH_VALUE"] = (
-        unique_medicines["VMP_SNOMED_CODE"]
-        .astype(str)
-        .apply(lambda x: abs(hash(x)) % 100)
-    )
-
-    def ven_class(hash_value):
-        if hash_value < 20:
-            return "V"
-        elif hash_value < 60:
-            return "E"
-        return "N"
-
-    unique_medicines["VEN_CLASS"] = unique_medicines["HASH_VALUE"].apply(
-        ven_class
-    )
-
-    def substitutable(hash_value):
-        return int(hash_value >= 40)
-
-    unique_medicines["SUBSTITUTABLE"] = unique_medicines["HASH_VALUE"].apply(
-        substitutable
-    )
-
-    weight_map = {
-        ("V", 0): 1.00,
-        ("V", 1): 0.80,
-        ("E", 0): 0.60,
-        ("E", 1): 0.40,
-        ("N", 0): 0.20,
-        ("N", 1): 0.10,
-    }
-
-    unique_medicines["CLINICAL_IMPACT_WEIGHT"] = unique_medicines.apply(
-        lambda row: weight_map[
-            (row["VEN_CLASS"], row["SUBSTITUTABLE"])
-        ],
-        axis=1,
-    )
-
-    df = df.merge(
-        unique_medicines[
-            [
-                "VMP_SNOMED_CODE",
-                "VEN_CLASS",
-                "SUBSTITUTABLE",
-                "CLINICAL_IMPACT_WEIGHT",
-            ]
-        ],
-        on="VMP_SNOMED_CODE",
-        how="left",
-    )
-
+    mapping = ven_mapping[["VMP_SNOMED_CODE", "VEN_CLASS"]].drop_duplicates()
+    df = df.merge(mapping, on="VMP_SNOMED_CODE", how="left")
+    df["VEN_CLASS"] = df["VEN_CLASS"].fillna("UNCLASSIFIED")
     return df
