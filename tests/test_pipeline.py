@@ -61,3 +61,30 @@ def test_invalid_reorder_quantile_rejected():
     frame["INITIAL_INVENTORY"] = 0.0
     with pytest.raises(ValueError):
         simulate_inventory(frame, reorder_quantile=1.0)
+
+def test_chunked_loader_aggregates_across_chunks_and_keeps_units(tmp_path):
+    from data_loader import load_raw_data
+
+    rows = [
+        ["202501", "TR1", "100", "Medicine A", "U1", "tablet", 5, 10],
+        ["202501", "TR1", "100", "Medicine A", "U1", "tablet", -2, 4],
+        ["202501", "TR1", "100", "Medicine A", "U2", "ml", 3, 6],
+        ["202502", "TR1", "100", "Medicine A", "U1", "tablet", -1, 2],
+    ]
+    columns = [
+        "YEAR_MONTH", "ODS_CODE", "VMP_SNOMED_CODE", "VMP_PRODUCT_NAME",
+        "UNIT_OF_MEASURE_IDENTIFIER", "UNIT_OF_MEASURE_NAME",
+        "TOTAL_QUANITY_IN_VMP_UNIT", "INDICATIVE_COST",
+    ]
+    path = tmp_path / "sample.csv"
+    pd.DataFrame(rows, columns=columns).to_csv(path, index=False)
+
+    result = load_raw_data(path, chunksize=2)
+    assert len(result) == 3
+    tablet = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"]
+    jan = tablet[tablet["YEAR_MONTH"] == "202501"].iloc[0]
+    feb = tablet[tablet["YEAR_MONTH"] == "202502"].iloc[0]
+    assert jan["DEMAND"] == 5
+    assert jan["SIGNED_NET_QUANTITY"] == 3
+    assert jan["NEGATIVE_QUANTITY_COUNT"] == 1
+    assert pd.isna(feb["DEMAND"])
