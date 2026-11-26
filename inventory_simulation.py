@@ -2,191 +2,101 @@ import numpy as np
 import pandas as pd
 
 
+GROUP = "MEDICINE_HOSPITAL_ID"
+
+
 def assign_lead_times(df, seed=42):
-    df = df.copy()
-
+    """Assign reproducible scenario lead times; these are assumptions, not observed supplier data."""
+    out = df.copy()
     rng = np.random.default_rng(seed)
-
-    series_ids = (
-        df["MEDICINE_HOSPITAL_ID"]
-        .drop_duplicates()
-        .to_numpy()
-    )
-
-    lead_time_map = {}
-
-    for series_id in series_ids:
-        lead_time_map[series_id] = int(
-            rng.choice([1, 2, 3], p=[0.60, 0.30, 0.10])
-        )
-
-    df["LEAD_TIME_MONTHS"] = df["MEDICINE_HOSPITAL_ID"].map(
-        lead_time_map
-    )
-
-    return df
+    ids = out[GROUP].drop_duplicates().to_numpy()
+    mapping = {key: int(rng.choice([1, 2, 3], p=[0.60, 0.30, 0.10])) for key in ids}
+    out["LEAD_TIME_MONTHS"] = out[GROUP].map(mapping).astype("int8")
+    out["LEAD_TIME_ASSUMED"] = 1
+    return out
 
 
 def calculate_initial_inventory(df, multiplier=1.5):
-    df = df.copy()
-
-    initial_inventory = (
-        df.groupby("MEDICINE_HOSPITAL_ID")["DEMAND"]
-        .apply(
-            lambda x: (
-                multiplier * x.iloc[:6].mean()
-                if len(x) >= 6
-                else multiplier * x.mean()
-            )
-        )
-        .reset_index(name="INITIAL_INVENTORY")
-    )
-
-    df = df.merge(
-        initial_inventory,
-        on="MEDICINE_HOSPITAL_ID",
-        how="left",
-    )
-
-    return df
+    out = df.copy()
+    rows = []
+    for key, group in out.groupby(GROUP, sort=False):
+        observed = group["DEMAND"].dropna()
+        initial = float(observed.head(6).mean() * multiplier) if not observed.empty else 0.0
+        rows.append({GROUP: key, "INITIAL_INVENTORY": initial})
+    initial = pd.DataFrame(rows)
+    return out.merge(initial, on=GROUP, how="left", validate="many_to_one")
 
 
-def simulate_inventory(
-    df,
-    target_stock_multiplier=1.5,
-    reorder_quantile=0.90,
-    lead_time_delay_months=0,
-):
+def simulate_inventory(df, target_stock_multiplier=1.5, reorder_quantile=0.90,
+                       lead_time_delay_months=0):
+    """Periodic-review inventory simulation in each medicine's native unit.
+
+    Missing observations are not treated as zero consumption. Unmet demand is
+    recorded as shortage and is not carried as backorder in this baseline model.
     """
-    Simulates a monthly inventory system.
+    if not 0 < reorder_quantile < 1:
+        raise ValueError("reorder_quantile must be between 0 and 1")
 
-    Demand is taken from DEMAND_SCENARIO.
-    Orders are placed when inventory falls below the reorder point.
-    Orders arrive after the assigned lead time.
-    """
+    out = df.sort_values([GROUP, "DATE"]).copy()
+    frames = []
 
-    df = df.copy()
-    df = df.sort_values(
-        by=["MEDICINE_HOSPITAL_ID", "DATE"]
-    )
-
-    output_frames = []
-
-    for series_id, group in df.groupby("MEDICINE_HOSPITAL_ID"):
+    for _, group in out.groupby(GROUP, sort=False):
         group = group.copy().reset_index(drop=True)
-
-        demand = group["DEMAND_SCENARIO"].to_numpy()
-        lead_time = int(
-            group["LEAD_TIME_MONTHS"].iloc[0]
-            + lead_time_delay_months
-        )
-
+        demand = pd.to_numeric(group["DEMAND_SCENARIO"], errors="coerce").to_numpy(float)
         n = len(group)
-
+        lead = max(1, int(group["LEAD_TIME_MONTHS"].iloc[0]) + int(lead_time_delay_months))
         inventory = np.zeros(n)
-        incoming_order = np.zeros(n)
-        order_quantity = np.zeros(n)
-        reorder_point = np.zeros(n)
-        available_supply = np.zeros(n)
-        lead_time_demand = np.zeros(n)
-        stockout_event = np.zeros(n, dtype=int)
-        shortage_quantity = np.zeros(n)
+        incoming = np.zeros(n)
+        orders = np.zeros(n)
+        reorder_points = np.zeros(n)
+        available = np.zeros(n)
+        shortages = np.zeros(n)
+        stockouts = np.zeros(n, dtype="int8")
+        forecasts = np.full(n, np.nan)
+        pending = {}
 
-        current_inventory = group["INITIAL_INVENTORY"].iloc[0]
-
-        average_demand = max(demand.mean(), 1.0)
-
-        target_stock = (
-            target_stock_multiplier + lead_time
-        ) * average_demand
-
-        pending_orders = {}
+        initial = group["INITIAL_INVENTORY"].iloc[0]
+        current = float(initial) if pd.notna(initial) else 0.0
+        observed_history = []
 
         for t in range(n):
-            # Forecast proxy: rolling mean of previous demand
-            if t == 0:
-                forecast = demand[t]
+            incoming[t] = pending.pop(t, 0.0)
+            available[t] = current + incoming[t]
+            observed = demand[t]
+
+            if np.isfinite(observed):
+                forecast = float(np.mean(observed_history[-6:])) if observed_history else max(observed, 0.0)
+                forecasts[t] = forecast
+                history_std = float(np.std(observed_history[-6:])) if len(observed_history) >= 2 else 0.0
+                safety_stock = max(0.0, 1.645 * history_std)
+                reorder_points[t] = lead * forecast + safety_stock
+
+                shortages[t] = max(0.0, observed - available[t])
+                stockouts[t] = int(shortages[t] > 0)
+                current = max(0.0, available[t] - observed)
+                observed_history.append(float(observed))
+
+                outstanding = sum(pending.values())
+                inventory_position = current + outstanding
+                target = (lead + target_stock_multiplier) * max(forecast, 0.0)
+                if inventory_position <= reorder_points[t]:
+                    qty = max(0.0, target - inventory_position)
+                    orders[t] = qty
+                    pending[t + lead] = pending.get(t + lead, 0.0) + qty
             else:
-                forecast = demand[:t].mean()
+                # No report for this month: preserve stock and do not infer zero demand.
+                current = available[t]
 
-            # Forecast uncertainty proxy
-            if t >= 3:
-                residual_proxy = np.abs(
-                    demand[:t] - np.repeat(
-                        np.convolve(
-                            demand[:t],
-                            np.ones(3) / 3,
-                            mode="valid",
-                        ),
-                        1,
-                    )
-                )
-                uncertainty = max(
-                    np.percentile(residual_proxy, reorder_quantile * 100),
-                    0.1 * forecast,
-                )
-            else:
-                uncertainty = 0.25 * forecast
+            inventory[t] = current
 
-            reorder_point[t] = (
-                lead_time * forecast
-                + uncertainty
-            )
-
-            # Place order if needed
-            if current_inventory <= reorder_point[t]:
-                order_quantity[t] = max(
-                    0,
-                    target_stock - current_inventory,
-                )
-
-                arrival_month = t + lead_time
-
-                if arrival_month < n:
-                    pending_orders[arrival_month] = (
-                        pending_orders.get(arrival_month, 0)
-                        + order_quantity[t]
-                    )
-
-            # Receive orders due this month
-            incoming_order[t] = pending_orders.get(t, 0)
-
-            # Available supply before current demand
-            available_supply[t] = current_inventory + incoming_order[t]
-
-            # Demand over lead-time horizon
-            end_index = min(t + lead_time, n)
-            lead_time_demand[t] = demand[t:end_index].sum()
-
-            # Stockout determination
-            if lead_time_demand[t] > available_supply[t]:
-                stockout_event[t] = 1
-                shortage_quantity[t] = (
-                    lead_time_demand[t] - available_supply[t]
-                )
-
-            # Update inventory after current demand
-            current_inventory = max(
-                0,
-                current_inventory
-                + incoming_order[t]
-                - demand[t],
-            )
-
-            inventory[t] = current_inventory
-
-        group["FORECAST_DEMAND"] = forecast
-        group["REORDER_POINT"] = reorder_point
-        group["ORDER_QUANTITY"] = order_quantity
-        group["INCOMING_ORDER"] = incoming_order
+        group["FORECAST_DEMAND"] = forecasts
+        group["REORDER_POINT"] = reorder_points
+        group["ORDER_QUANTITY"] = orders
+        group["INCOMING_ORDER"] = incoming
         group["INVENTORY_ON_HAND"] = inventory
-        group["AVAILABLE_SUPPLY"] = available_supply
-        group["LEAD_TIME_DEMAND"] = lead_time_demand
-        group["STOCKOUT_EVENT"] = stockout_event
-        group["SHORTAGE_QUANTITY"] = shortage_quantity
+        group["AVAILABLE_SUPPLY"] = available
+        group["STOCKOUT_EVENT"] = stockouts
+        group["SHORTAGE_QUANTITY"] = shortages
+        frames.append(group)
 
-        output_frames.append(group)
-
-    df = pd.concat(output_frames, ignore_index=True)
-
-    return df
+    return pd.concat(frames, ignore_index=True) if frames else out
