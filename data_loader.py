@@ -67,7 +67,7 @@ def load_raw_data(path=INPUT_FILE, chunksize=CHUNK_SIZE):
                 "DEMAND": ("DEMAND", lambda x: x.sum(min_count=1)),
                 "RAW_QUANTITY": ("RAW_QUANTITY", "sum"),
                 "INDICATIVE_COST_TOTAL": (COST_COL, lambda x: x.where(x >= 0).sum(min_count=1)),
-                "COST_RECORDS": (COST_COL, "count"),
+                "COST_RECORDS": (COST_COL, lambda x: int((x >= 0).sum())),
                 "NEGATIVE_QUANTITY_COUNT": ("NEGATIVE_QUANTITY_FLAG", "sum"),
                 "NEGATIVE_COST_COUNT": ("NEGATIVE_COST_FLAG", "sum"),
                 MEDICINE_NAME_COL: (MEDICINE_NAME_COL, "first"),
