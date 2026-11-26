@@ -68,8 +68,10 @@ def add_reliability_columns(df, target="GROSS_POSITIVE_QUANTITY",
         radius = prior_abs.rolling(window, min_periods=min(3, window)).quantile(
             nominal_coverage).to_numpy()
         lower, upper = forecast - radius, forecast + radius
-        rolling_mae = pd.Series(abs_error).rolling(window, min_periods=1).mean().to_numpy()
-        rolling_bias = pd.Series(signed).rolling(window, min_periods=1).mean().to_numpy()
+        rolling_mae_series = pd.Series(abs_error).rolling(window, min_periods=1).mean()
+        rolling_bias_series = pd.Series(signed).rolling(window, min_periods=1).mean()
+        rolling_mae = rolling_mae_series.to_numpy()
+        rolling_bias = rolling_bias_series.to_numpy()
         err_sum = pd.Series(abs_error).rolling(window, min_periods=1).sum()
         actual_sum = pd.Series(np.where(np.isfinite(actual), np.abs(actual), np.nan)).rolling(
             window, min_periods=1).sum()
@@ -80,13 +82,24 @@ def add_reliability_columns(df, target="GROSS_POSITIVE_QUANTITY",
         cusum = _cusum_flags(abs_error, window=window)
         adwin_like = _adwin_like_flags(abs_error)
         drift = np.maximum(cusum, adwin_like)
-        scale = max(float(np.nanmax(rolling_mae)) if np.isfinite(rolling_mae).any() else 0, 1e-12)
-        mae_component = np.clip(rolling_mae / scale, 0, 1)
-        bias_component = np.clip(np.abs(rolling_bias) / scale, 0, 1)
-        calibration = np.clip((nominal_coverage - np.nan_to_num(coverage, nan=nominal_coverage))
-                              / nominal_coverage, 0, 1)
+
+        # Scale each row using only earlier errors; never use future performance
+        # to normalise historical reliability scores.
+        prior_scale = rolling_mae_series.shift(1).expanding(min_periods=1).max().to_numpy()
+        prior_scale = np.where(np.isfinite(prior_scale), np.maximum(prior_scale, 1e-12), 1.0)
+        available = np.isfinite(rolling_mae) & np.isfinite(rolling_bias)
+        mae_component = np.nan_to_num(np.clip(rolling_mae / prior_scale, 0, 1), nan=0.0)
+        bias_component = np.nan_to_num(
+            np.clip(np.abs(rolling_bias) / prior_scale, 0, 1), nan=0.0
+        )
+        calibration = np.clip(
+            (nominal_coverage - np.nan_to_num(coverage, nan=nominal_coverage))
+            / nominal_coverage, 0, 1
+        )
         score = np.clip(.35 * mae_component + .25 * bias_component +
                         .25 * calibration + .15 * drift, 0, 1)
+        score = np.where(available, score, 0.0)
+
         g["FORECAST_TARGET"] = target
         g["BASELINE_FORECAST"] = forecast
         g["FORECAST_RESIDUAL"] = residual
@@ -99,8 +112,9 @@ def add_reliability_columns(df, target="GROSS_POSITIVE_QUANTITY",
         g["CUSUM_DRIFT_FLAG"] = cusum
         g["ADWIN_LIKE_DRIFT_FLAG"] = adwin_like
         g["DRIFT_FLAG"] = drift
+        g["RELIABILITY_SCORE_AVAILABLE"] = available.astype("int8")
         g["RELIABILITY_SCORE"] = score
-        g["RISK_ALERT"] = (score >= RISK_ALERT_THRESHOLD).astype("int8")
+        g["RISK_ALERT"] = ((score >= RISK_ALERT_THRESHOLD) & available).astype("int8")
         frames.append(g)
     return pd.concat(frames, ignore_index=True) if frames else df.copy()
 

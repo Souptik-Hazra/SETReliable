@@ -169,3 +169,16 @@ def test_audit_rejects_missing_required_schema(tmp_path):
     pd.DataFrame({"YEAR_MONTH": ["202501"]}).to_csv(path, index=False)
     with pytest.raises(ValueError, match="Missing required columns"):
         audit(path)
+
+
+def test_reliability_score_is_finite_and_warmup_is_explicit():
+    frame = pd.DataFrame({
+        "MEDICINE_HOSPITAL_ID": ["s"] * 5,
+        "DATE": pd.date_range("2025-01-01", periods=5, freq="MS"),
+        "GROSS_POSITIVE_QUANTITY": [10.0, 12.0, 15.0, 8.0, 11.0],
+    })
+    result = add_reliability_columns(frame, target="GROSS_POSITIVE_QUANTITY", window=2)
+    assert np.isfinite(result["RELIABILITY_SCORE"]).all()
+    assert result.loc[0, "RELIABILITY_SCORE_AVAILABLE"] == 0
+    assert result.loc[0, "RISK_ALERT"] == 0
+    assert result.loc[1:, "RELIABILITY_SCORE_AVAILABLE"].eq(1).all()
