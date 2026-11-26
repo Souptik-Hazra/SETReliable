@@ -50,7 +50,8 @@ def simple_adwin_like_detector(values, window=6, threshold=2.0):
 
 def rolling_calibration_error(actual, lower_bound, upper_bound, window,
                               nominal_coverage=0.90):
-    covered = ((actual >= lower_bound) & (actual <= upper_bound)).astype(float)
+    valid = np.isfinite(actual) & np.isfinite(lower_bound) & np.isfinite(upper_bound)
+    covered = np.where(valid, ((actual >= lower_bound) & (actual <= upper_bound)).astype(float), np.nan)
     return (pd.Series(covered).rolling(window, min_periods=1).mean()
             - nominal_coverage).to_numpy()
 
