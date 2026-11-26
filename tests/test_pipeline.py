@@ -2,12 +2,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data_loader import _clean_text, load_raw_data
+from data_loader import _clean_text, load_raw_data, create_continuous_monthly_series
 from demand_scenarios import create_abrupt_surge_scenario
 from feature_engineering import add_target_features
-from inventory_simulation import (
-    assign_lead_times, calculate_initial_inventory, simulate_inventory,
-)
+from inventory_simulation import simulate_inventory
 from reliability_monitoring import add_reliability_columns, evaluate_forecast_metrics
 
 
@@ -37,31 +35,32 @@ def test_text_cleaning():
 
 def test_chunk_aggregation_preserves_gross_negative_net_and_unit_identity(tmp_path):
     result = load_raw_data(source_rows(tmp_path), chunksize=2)
-    assert len(result) == 2
+    assert len(result) == 4
     u1 = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"].sort_values("DATE")
-    jan = u1.iloc[0]
-    feb = u1.iloc[1]
+    jan, feb = u1.iloc[0], u1.iloc[1]
     assert jan["GROSS_POSITIVE_QUANTITY"] == 5
     assert jan["NEGATIVE_QUANTITY_TOTAL"] == -2
     assert jan["NET_QUANTITY"] == 3
     assert jan["NEGATIVE_QUANTITY_COUNT"] == 1
-    assert feb["GROSS_POSITIVE_QUANTITY"] is np.nan or pd.isna(feb["GROSS_POSITIVE_QUANTITY"])
+    assert pd.isna(feb["GROSS_POSITIVE_QUANTITY"])
     assert feb["NEGATIVE_QUANTITY_TOTAL"] == -1
     assert feb["NET_QUANTITY"] == -1
 
 
-def test_unit_name_variation_does_not_split_series(tmp_path):
+def test_unit_name_variation_does_not_split_series_and_is_reported(tmp_path):
     result = load_raw_data(source_rows(tmp_path), chunksize=1)
     u1 = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"]
     assert len(u1) == 3
+    assert u1["UNIT_NAME_VARIANTS"].eq(2).all()
 
 
-def test_missing_months_remain_missing(tmp_path):
+def test_missing_month_measurements_remain_missing(tmp_path):
     result = load_raw_data(source_rows(tmp_path), chunksize=2)
     monthly = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"]
-    from data_loader import create_continuous_monthly_series
     continuous = create_continuous_monthly_series(monthly)
-    assert continuous.loc[continuous["YEAR_MONTH"] == "202502", "GROSS_POSITIVE_QUANTITY"].isna().all()
+    feb = continuous[continuous["YEAR_MONTH"] == "202502"].iloc[0]
+    assert pd.isna(feb["GROSS_POSITIVE_QUANTITY"])
+    assert feb["OBSERVATION_MISSING"] == 0  # a negative-only source month was reported
 
 
 def sample_inventory():
@@ -84,8 +83,7 @@ def test_negative_movements_are_separate_inflows_not_negative_demand():
 
 
 def test_missing_month_does_not_consume_stock():
-    frame = sample_inventory()
-    result = simulate_inventory(frame)
+    result = simulate_inventory(sample_inventory())
     missing = result.loc[2]
     assert missing["SHORTAGE_QUANTITY"] == 0
     assert missing["INVENTORY_ON_HAND"] == missing["AVAILABLE_SUPPLY"]
@@ -112,6 +110,5 @@ def test_forecast_uses_prior_month_and_not_current_month():
 
 
 def test_scenario_preserves_missing_observations():
-    frame = sample_inventory()
-    result = create_abrupt_surge_scenario(frame, surge_months=2)
-    assert result.loc[2, "SCENARIO_QUANTITY"] != result.loc[2, "SCENARIO_QUANTITY"]
+    result = create_abrupt_surge_scenario(sample_inventory(), surge_months=2)
+    assert pd.isna(result.loc[2, "SCENARIO_QUANTITY"])
