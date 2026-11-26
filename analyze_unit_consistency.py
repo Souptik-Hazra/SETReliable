@@ -50,10 +50,10 @@ def analyze(path=INPUT_FILE, chunksize=None, memory_limit="4GB", temp_directory=
         """).df()
 
         result["UNIT_NAME_VARIANTS"] = result["UNIT_NAMES"].map(
-            lambda values: len(values) if values else 0
+            lambda values: len(values) if values is not None else 0
         ).astype("int16")
         result["UNIT_NAMES"] = result["UNIT_NAMES"].map(
-            lambda values: " | ".join(values) if values else ""
+            lambda values: " | ".join(values) if values is not None and len(values) else ""
         )
         return result.sort_values(
             ["UNIT_NAME_VARIANTS", "ODS_CODE", "VMP_SNOMED_CODE"],
