@@ -182,3 +182,18 @@ def test_reliability_score_is_finite_and_warmup_is_explicit():
     assert result.loc[0, "RELIABILITY_SCORE_AVAILABLE"] == 0
     assert result.loc[0, "RISK_ALERT"] == 0
     assert result.loc[1:, "RELIABILITY_SCORE_AVAILABLE"].eq(1).all()
+
+
+def test_unit_name_audit_is_unit_aware_and_global(tmp_path):
+    from analyze_unit_consistency import analyze
+    path = source_rows(tmp_path)
+    frame = pd.read_csv(path, dtype="string")
+    frame.loc[frame["UNIT_OF_MEASURE_IDENTIFIER"] == "U1", "UNIT_OF_MEASURE_NAME"] = "tablet"
+    frame.loc[frame["YEAR_MONTH"] == "202502", "UNIT_OF_MEASURE_NAME"] = "tablets"
+    frame.to_csv(path, index=False)
+    result = analyze(path, chunksize=2)
+    u1 = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"].iloc[0]
+    u2 = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U2"].iloc[0]
+    assert u1["UNIT_NAME_VARIANTS"] == 2
+    assert u1["UNIT_NAMES"] == "tablet | tablets"
+    assert u2["UNIT_NAME_VARIANTS"] == 1
