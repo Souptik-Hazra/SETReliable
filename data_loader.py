@@ -64,9 +64,9 @@ def load_raw_data(path=INPUT_FILE, chunksize=CHUNK_SIZE):
         df.groupby(keys, as_index=False, dropna=False)
         .agg(
             **{
-                "DEMAND": ("DEMAND", "sum"),
+                "DEMAND": ("DEMAND", lambda x: x.sum(min_count=1)),
                 "RAW_QUANTITY": ("RAW_QUANTITY", "sum"),
-                "INDICATIVE_COST_TOTAL": (COST_COL, "sum"),
+                "INDICATIVE_COST_TOTAL": (COST_COL, lambda x: x.where(x >= 0).sum(min_count=1)),
                 "COST_RECORDS": (COST_COL, "count"),
                 "NEGATIVE_QUANTITY_COUNT": ("NEGATIVE_QUANTITY_FLAG", "sum"),
                 "NEGATIVE_COST_COUNT": ("NEGATIVE_COST_FLAG", "sum"),
