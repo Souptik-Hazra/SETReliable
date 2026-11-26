@@ -2,7 +2,7 @@ import pandas as pd
 
 from config import (
     OUTPUT_DIR, OUTPUT_BASE_FILE, OUTPUT_SUMMARY_FILE,
-    INITIAL_INVENTORY_MULTIPLIER, TARGET_STOCK_MULTIPLIER,
+    TARGET_STOCK_MULTIPLIER,
     REORDER_QUANTILE, ROLLING_WINDOW, NOMINAL_COVERAGE,
     ABRUPT_SURGE_FACTORS, ABRUPT_SURGE_MONTHS,
     GRADUAL_DRIFT_TOTAL_INCREASES, GRADUAL_DRIFT_MONTHS,
@@ -53,9 +53,7 @@ def prepare_base_data():
     monthly = assign_clinical_priority(monthly)
     monthly = create_stable_scenario(monthly)
     monthly = assign_lead_times(monthly, seed=RANDOM_SEED)
-    monthly = calculate_initial_inventory(
-        monthly, multiplier=INITIAL_INVENTORY_MULTIPLIER
-    )
+    monthly = calculate_initial_inventory(monthly, initial_inventory=0.0)
     monthly = simulate_inventory(
         monthly,
         target_stock_multiplier=TARGET_STOCK_MULTIPLIER,
