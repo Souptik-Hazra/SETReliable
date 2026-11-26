@@ -112,3 +112,26 @@ def test_forecast_uses_prior_month_and_not_current_month():
 def test_scenario_preserves_missing_observations():
     result = create_abrupt_surge_scenario(sample_inventory(), surge_months=2)
     assert pd.isna(result.loc[2, "SCENARIO_QUANTITY"])
+
+
+
+def test_extended_lags_and_rolling_features_are_past_only():
+    from feature_engineering import add_target_features
+    frame = pd.DataFrame({
+        "MEDICINE_HOSPITAL_ID": ["s"] * 15,
+        "DATE": pd.date_range("2024-01-01", periods=15, freq="MS"),
+        "GROSS_POSITIVE_QUANTITY": np.arange(1, 16, dtype=float),
+    })
+    result = add_target_features(frame, "GROSS_POSITIVE_QUANTITY")
+    assert result.loc[12, "GROSS_POSITIVE_QUANTITY_LAG_12"] == 1
+    assert result.loc[3, "GROSS_POSITIVE_QUANTITY_ROLLING_MEAN_3M"] == 2
+
+
+def test_drift_monitors_are_available_and_causal():
+    from reliability_monitoring import _cusum_flags, _adwin_like_flags
+    errors = np.array([1.0] * 12 + [20.0] * 8)
+    cusum = _cusum_flags(errors, window=4)
+    adaptive = _adwin_like_flags(errors, min_window=3)
+    assert len(cusum) == len(errors)
+    assert len(adaptive) == len(errors)
+    assert cusum[-1] == 1
