@@ -9,7 +9,7 @@ from config import (
     APPLY_NEGATIVE_MOVEMENTS_AS_RETURNS,
 )
 from data_loader import load_raw_data, filter_series, create_continuous_monthly_series
-from feature_engineering import add_time_features, add_target_features, add_intermittent_flag
+from feature_engineering import add_time_features, add_target_features, add_intermittent_flag, assign_clinical_priority
 from demand_scenarios import (
     create_stable_scenario, create_abrupt_surge_scenario,
     create_gradual_drift_scenario, create_volatility_scenario,
@@ -97,6 +97,7 @@ def main():
     eligible = filter_series(raw, min_months=MIN_HISTORY_MONTHS, target=GROSS_TARGET)
     monthly = create_continuous_monthly_series(eligible)
     monthly = add_time_features(monthly)
+    monthly = assign_clinical_priority(monthly)
     monthly.to_csv(OUTPUT_DIR / "monthly_observed_measures.csv", index=False)
 
     metrics = [run_target_experiment(monthly, target) for target in FORECAST_TARGETS]

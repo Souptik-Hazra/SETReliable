@@ -25,8 +25,12 @@ def calculate_initial_inventory(df, initial_inventory=0.0):
 
 
 def simulate_inventory(df, target_stock_multiplier=1.5, reorder_quantile=0.90,
-                       lead_time_delay_months=0, apply_negative_movements_as_returns=True):
-    """Hypothetical stock simulation; negative movements are a separate inflow assumption."""
+                       lead_time_delay_months=0, apply_negative_movements_as_returns=False):
+    """Hypothetical movement stress test, not a reconstruction of actual Trust stock.
+
+    SCMD does not supply verified opening balances, receipts or supplier lead
+    times. Negative movements are excluded from simulated supply by default.
+    """
     if not 0 < reorder_quantile < 1:
         raise ValueError("reorder_quantile must be between 0 and 1")
     if target_stock_multiplier < 0 or lead_time_delay_months < 0:
@@ -40,7 +44,6 @@ def simulate_inventory(df, target_stock_multiplier=1.5, reorder_quantile=0.90,
     frames = []
     for _, source in df.sort_values([GROUP, "DATE"]).groupby(GROUP, sort=False):
         group = source.copy().reset_index(drop=True)
-        # Scenario values are used when supplied; otherwise use observed gross issues.
         issue_col = "SCENARIO_QUANTITY" if "SCENARIO_QUANTITY" in group else "GROSS_POSITIVE_QUANTITY"
         gross = pd.to_numeric(group[issue_col], errors="coerce").to_numpy(float)
         negative = pd.to_numeric(group["NEGATIVE_QUANTITY_TOTAL"], errors="coerce").to_numpy(float)
@@ -94,5 +97,6 @@ def simulate_inventory(df, target_stock_multiplier=1.5, reorder_quantile=0.90,
             group[col] = values
         group["NEGATIVE_MOVEMENTS_TREATED_AS_RETURNS"] = int(apply_negative_movements_as_returns)
         group["INVENTORY_SIMULATION_IS_HYPOTHETICAL"] = 1
+        group["STOCKOUTS_ARE_OBSERVED"] = 0
         frames.append(group)
     return pd.concat(frames, ignore_index=True) if frames else df.copy()
