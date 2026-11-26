@@ -15,7 +15,7 @@ def assign_lead_times(df, seed=42):
     return out
 
 
-def calculate_initial_inventory(df, multiplier=1.5, initial_inventory=0.0):
+def calculate_initial_inventory(df, initial_inventory=0.0):
     """Set an explicit opening balance; never inspect future demand to initialize stock."""
     if initial_inventory < 0:
         raise ValueError("initial_inventory cannot be negative")
