@@ -65,3 +65,28 @@ python run_simulation.py
 - `inventory_scenario_summary.csv`: synthetic scenario summary.
 
 The forecast is a naive previous-observed-month baseline, not a trained forecasting model. The reliability indicators describe this baseline's historical out-of-sample errors and should not be presented as validation of a production forecasting system.
+
+
+## Restored research workflow
+
+The original SETReliable research flow is retained: data-quality investigation, medicine–Trust time-series construction, temporal feature engineering, demand stress scenarios, hypothetical inventory simulation, and reliability/drift monitoring. The current SCMD adapter is the only source-schema contract; older dataset column names are not accepted.
+
+### Reproducible analysis commands
+
+```bash
+python dataset_profile.py
+python data_quality_analysis.py
+python analyze_unit_consistency.py
+python investigate_quantities.py
+python create_modeling_dataset.py
+python run_simulation.py
+pytest -q
+```
+
+The quality audit uses a temporary SQLite database for global exact-row and Trust–medicine–unit–month duplicate detection; it removes the database on normal completion. Pass an explicit `sqlite_path` to `audit()` when retaining the audit database is desired.
+
+The modelling dataset includes calendar features, lags 1/2/3/6/12, and past-only rolling mean, standard deviation and maximum over 3/6 months. No future values are used in these features. Missing calendar months are marked as unobserved and are never silently converted into zero issue quantities.
+
+Reliability monitoring includes rolling MAE/WAPE/bias, empirical prediction-interval coverage, CUSUM-style drift flags, and a lightweight adaptive-window mean-shift heuristic. The latter is explicitly an ADWIN-like heuristic, not a formal ADWIN implementation. These measures evaluate a naive previous-observation baseline, not a trained forecasting model.
+
+VEN/clinical priority remains unclassified unless a verified mapping is supplied. The SCMD file does not contain enough information to infer clinical criticality or substitutability.
