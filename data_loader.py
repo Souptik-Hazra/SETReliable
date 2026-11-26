@@ -46,18 +46,18 @@ def load_raw_data(path=INPUT_FILE, chunksize=CHUNK_SIZE):
         chunk[ODS_CODE_COL] = _clean_text(chunk[ODS_CODE_COL])
         chunk[MEDICINE_CODE_COL] = _clean_text(chunk[MEDICINE_CODE_COL])
         chunk[MEDICINE_NAME_COL] = _clean_text(chunk[MEDICINE_NAME_COL])
-        chunk[UNIT_ID_COL] = _clean_text(chunk[UNIT_ID_COL])
+        chunk[UNIT_ID_COL] = _clean_text(chunk[UNIT_ID_COL]).fillna("UNKNOWN_UNIT_ID")
         chunk[UNIT_COL] = _clean_text(chunk[UNIT_COL])
         chunk[QUANTITY_COL] = pd.to_numeric(chunk[QUANTITY_COL], errors="coerce")
         chunk[COST_COL] = pd.to_numeric(chunk[COST_COL], errors="coerce")
         chunk = chunk.dropna(subset=KEYS + [QUANTITY_COL])
 
-        chunk["POSITIVE_DEMAND"] = chunk[QUANTITY_COL].where(chunk[QUANTITY_COL] > 0, 0)
+        chunk["POSITIVE_DEMAND"] = chunk[QUANTITY_COL].where(chunk[QUANTITY_COL] >= 0)
         chunk["NEGATIVE_QUANTITY_COUNT"] = (chunk[QUANTITY_COL] < 0).astype("int32")
         chunk["NEGATIVE_COST_COUNT"] = (chunk[COST_COL] < 0).astype("int32")
         chunk["VALID_COST"] = chunk[COST_COL].where(chunk[COST_COL] >= 0)
         part = chunk.groupby(KEYS, as_index=False, observed=True, dropna=False).agg(
-            DEMAND=("POSITIVE_DEMAND", "sum"),
+            DEMAND=("POSITIVE_DEMAND", lambda x: x.sum(min_count=1)),
             SIGNED_NET_QUANTITY=(QUANTITY_COL, "sum"),
             NEGATIVE_QUANTITY_COUNT=("NEGATIVE_QUANTITY_COUNT", "sum"),
             NEGATIVE_COST_COUNT=("NEGATIVE_COST_COUNT", "sum"),
@@ -75,7 +75,7 @@ def load_raw_data(path=INPUT_FILE, chunksize=CHUNK_SIZE):
     # Only aggregated chunk results are concatenated, not the 10m raw rows.
     df = pd.concat(partials, ignore_index=True)
     df = df.groupby(KEYS, as_index=False, observed=True, dropna=False).agg(
-        DEMAND=("DEMAND", "sum"),
+        DEMAND=("DEMAND", lambda x: x.sum(min_count=1)),
         SIGNED_NET_QUANTITY=("SIGNED_NET_QUANTITY", "sum"),
         NEGATIVE_QUANTITY_COUNT=("NEGATIVE_QUANTITY_COUNT", "sum"),
         NEGATIVE_COST_COUNT=("NEGATIVE_COST_COUNT", "sum"),
