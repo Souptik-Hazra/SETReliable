@@ -1,16 +1,11 @@
 # SETReliable — NHSBSA Secondary-Care Medicines
 
-This branch adapts the project to the NHSBSA secondary-care medicines extract.
+## Dataset
 
-## Input data
+Place the current source file at `dataset/combined_secondary_care_medicines.csv`.
+The repository does not commit the dataset or generated outputs.
 
-Place the source file at:
-
-```text
-dataset/combined_secondary_care_medicines.csv
-```
-
-Expected columns (spelling is significant):
+The current file covers September 2023–May 2026 and uses this pre-June-2026 schema:
 
 - `YEAR_MONTH` (YYYYMM)
 - `ODS_CODE`
@@ -18,45 +13,55 @@ Expected columns (spelling is significant):
 - `VMP_PRODUCT_NAME`
 - `UNIT_OF_MEASURE_IDENTIFIER`
 - `UNIT_OF_MEASURE_NAME`
-- `TOTAL_QUANITY_IN_VMP_UNIT`
+- `TOTAL_QUANITY_IN_VMP_UNIT` (source spelling)
 - `INDICATIVE_COST`
 
-The dataset is not committed. `dataset/`, generated `outputs/`, and local quality reports are ignored by Git.
+NHSBSA's August 2026 change log introduced renamed UDFS unit columns and additional dose-unit columns with the June 2026 provisional release. Those later columns are not assumed by this pipeline because they are not present in the current file.
 
-## Environment and run
+## Quantity interpretation
 
-Python 3.10+ is recommended.
+NHSBSA clarification states that SCMD quantities are based on stock movements and stock-ledger balances. Negative values may represent returns or corrections and are usually corrected in finalised files; researchers must document their own cleaning protocol. The project therefore preserves three separate monthly measures:
+
+- `GROSS_POSITIVE_QUANTITY`: sum of positive source quantity rows.
+- `NEGATIVE_QUANTITY_TOTAL`: sum of negative source quantity rows, retaining the negative sign.
+- `NET_QUANTITY`: signed sum of all source quantity rows.
+
+Neither gross positive nor net quantity is automatically labelled patient-level demand. Both are forecast separately and compared using chronological one-step-ahead baseline evaluation. The negative movement measure remains available for audit and sensitivity analysis.
+
+## Series identity and data quality
+
+Monthly series are keyed by Trust (`ODS_CODE`), VMP SNOMED code, and unit-of-measure identifier. Unit name is descriptive metadata; changing names do not split a series. Different unit identifiers are never combined. Missing months remain missing, not zero. The loader attaches a `quality_report` to the returned DataFrame and the pipeline writes it to `outputs/data_quality_summary.csv`.
+
+Indicative cost is retained as supplied, including negative values. Cost anomalies should be investigated before cost-based conclusions. Indicative cost is not necessarily a Trust's actual net procurement cost.
+
+## Inventory simulation boundaries
+
+Inventory simulation uses gross positive quantities as the issue/consumption stream. Optionally, the magnitude of negative movements is modelled as a separate return/adjustment inflow. This is an explicit sensitivity assumption, not proof that every negative entry is a physical return. Opening stock and supplier lead times are assumed because the dataset does not provide verified on-hand balances or delivery records. Shortages, stockouts and orders are therefore hypothetical outputs, not observed NHS Trust shortages or procurement events.
+
+Synthetic surge, drift and volatility scenarios are stress tests and do not represent observed future outcomes. VEN classes are not fabricated; they remain unclassified unless a verified external mapping is supplied.
+
+## Setup
+
+Python 3.10+:
 
 ```bash
 python -m venv .venv
-# Windows Git Bash:
+# Windows Git Bash
 source .venv/Scripts/activate
-# Linux/macOS:
+# Linux/macOS
 source .venv/bin/activate
 pip install -r requirements.txt
 pytest -q
 python run_simulation.py
 ```
 
-Outputs are written to `outputs/`.
+## Outputs
 
-## Data interpretation and limitations
+- `data_quality_summary.csv`: source-row and cleaning counts.
+- `monthly_observed_measures.csv`: gross, negative and net monthly measures.
+- `forecast_gross_positive_quantity.csv` and `forecast_net_quantity.csv`: separate target evaluations.
+- `forecast_comparison.csv`: MAE, RMSE, WAPE and bias comparison.
+- `inventory_*.csv`: hypothetical gross-issue inventory stress tests.
+- `inventory_scenario_summary.csv`: synthetic scenario summary.
 
-- Rows are aggregated by month, Trust, VMP SNOMED code, unit identifier, and unit name. Different units are never added together.
-- `SIGNED_NET_QUANTITY` retains the signed total. Negative source rows are counted and preserved as adjustment evidence.
-- `DEMAND` is the sum of positive quantity rows only. This is a modelling convention pending authoritative confirmation of the meaning of negative entries; it must not be interpreted as validated net consumption.
-- Missing Trust-medicine-unit months are represented as missing observations, not zero demand.
-- Indicative cost is retained separately. Cost anomalies (including the reported 202502 spike) require source-level investigation before cost-based conclusions.
-- Lead times and opening inventory are assumptions, not observed procurement/inventory records. Opening inventory defaults to zero to avoid future-data leakage.
-- Abrupt surge, gradual drift, and volatility outputs are synthetic stress scenarios, not observed future outcomes.
-- This dataset does not by itself provide on-hand stock, orders, supplier lead times, clinical VEN classes, or verified shortage outcomes. The simulation is therefore an assumption-driven scenario model, not a validated inventory/reliability forecast.
-
-## Project modules
-
-- `data_loader.py`: chunked CSV read and monthly aggregation
-- `feature_engineering.py`: calendar, lag, rolling, and intermittent-demand features
-- `demand_scenarios.py`: synthetic stress scenarios
-- `inventory_simulation.py`: assumed-lead-time inventory simulation
-- `reliability_monitoring.py`: historical residual monitoring and interval diagnostics
-- `run_simulation.py`: end-to-end execution and output validation
-- `tests/`: synthetic unit tests; no private dataset is required
+The forecast is a naive previous-observed-month baseline, not a trained forecasting model. The reliability indicators describe this baseline's historical out-of-sample errors and should not be presented as validation of a production forecasting system.
