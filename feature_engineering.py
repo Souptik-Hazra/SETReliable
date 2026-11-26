@@ -1,68 +1,69 @@
 import numpy as np
 import pandas as pd
 
-
 GROUP = "MEDICINE_HOSPITAL_ID"
 
 
 def add_time_features(df):
-    df = df.copy()
-    df["YEAR"] = df["DATE"].dt.year
-    df["MONTH"] = df["DATE"].dt.month
-    df["QUARTER"] = df["DATE"].dt.quarter
-    df["MONTH_SIN"] = np.sin(2 * np.pi * df["MONTH"] / 12)
-    df["MONTH_COS"] = np.cos(2 * np.pi * df["MONTH"] / 12)
-    return df
+    out = df.copy()
+    out["YEAR"] = out["DATE"].dt.year
+    out["MONTH"] = out["DATE"].dt.month
+    out["QUARTER"] = out["DATE"].dt.quarter
+    out["MONTH_SIN"] = np.sin(2 * np.pi * out["MONTH"] / 12)
+    out["MONTH_COS"] = np.cos(2 * np.pi * out["MONTH"] / 12)
+    return out
 
 
-def add_lag_features(df, lags=(1, 2, 3)):
-    df = df.sort_values([GROUP, "DATE"]).copy()
+def add_target_features(df, target, lags=(1, 2, 3), window=3):
+    if target not in df:
+        raise ValueError(f"Target column not found: {target}")
+    out = df.sort_values([GROUP, "DATE"]).copy()
+    grouped = out.groupby(GROUP)[target]
     for lag in lags:
-        df[f"DEMAND_LAG_{lag}"] = df.groupby(GROUP)["DEMAND"].shift(lag)
-    return df
-
-
-def add_rolling_features(df, window=3):
-    df = df.sort_values([GROUP, "DATE"]).copy()
-    grouped = df.groupby(GROUP)["DEMAND"]
-    df["ROLLING_MEAN_3M"] = grouped.transform(
+        out[f"{target}_LAG_{lag}"] = grouped.shift(lag)
+    out[f"{target}_ROLLING_MEAN_{window}M"] = grouped.transform(
         lambda x: x.shift(1).rolling(window, min_periods=1).mean()
     )
-    df["ROLLING_STD_3M"] = grouped.transform(
+    out[f"{target}_ROLLING_STD_{window}M"] = grouped.transform(
         lambda x: x.shift(1).rolling(window, min_periods=2).std()
     )
-    df["ROLLING_MAX_3M"] = grouped.transform(
+    out[f"{target}_ROLLING_MAX_{window}M"] = grouped.transform(
         lambda x: x.shift(1).rolling(window, min_periods=1).max()
     )
-    return df
+    return out
 
 
-def add_intermittent_flag(df, zero_threshold=0.30):
-    df = df.copy()
-    summary = df.groupby(GROUP)["DEMAND"].agg(
-        ZERO_DEMAND_SHARE=lambda x: x.eq(0).sum() / max(x.notna().sum(), 1),
+def add_intermittent_flag(df, target, zero_threshold=0.30):
+    if target not in df:
+        raise ValueError(f"Target column not found: {target}")
+    out = df.copy()
+    summary = out.groupby(GROUP)[target].agg(
+        ZERO_SHARE=lambda x: x.eq(0).sum() / max(x.notna().sum(), 1),
         OBSERVED_MONTHS="count",
     ).reset_index()
-    summary["IS_INTERMITTENT"] = (
-        summary["ZERO_DEMAND_SHARE"] >= zero_threshold
-    ).astype("int8")
-    return df.merge(summary, on=GROUP, how="left")
+    summary["IS_INTERMITTENT"] = (summary["ZERO_SHARE"] >= zero_threshold).astype("int8")
+    summary = summary.rename(columns={
+        "ZERO_SHARE": f"{target}_ZERO_SHARE",
+        "OBSERVED_MONTHS": f"{target}_OBSERVED_MONTHS",
+        "IS_INTERMITTENT": f"{target}_IS_INTERMITTENT",
+    })
+    return out.merge(summary, on=GROUP, how="left")
 
 
 def assign_clinical_priority(df, ven_mapping=None):
-    """Only assign VEN from an externally verified mapping; never fabricate it."""
-    df = df.copy()
+    """VEN labels require a separately verified clinical mapping."""
+    out = df.copy()
     if ven_mapping is None:
-        df["VEN_CLASS"] = "UNCLASSIFIED"
-        df["SUBSTITUTABLE"] = pd.NA
-        df["CLINICAL_IMPACT_WEIGHT"] = np.nan
-        return df
-
+        out["VEN_CLASS"] = "UNCLASSIFIED"
+        out["SUBSTITUTABLE"] = pd.NA
+        out["CLINICAL_IMPACT_WEIGHT"] = np.nan
+        return out
     required = {"VMP_SNOMED_CODE", "VEN_CLASS"}
     if not required.issubset(ven_mapping.columns):
         raise ValueError(f"VEN mapping must contain {sorted(required)}")
-
     mapping = ven_mapping[["VMP_SNOMED_CODE", "VEN_CLASS"]].drop_duplicates()
-    df = df.merge(mapping, on="VMP_SNOMED_CODE", how="left")
-    df["VEN_CLASS"] = df["VEN_CLASS"].fillna("UNCLASSIFIED")
-    return df
+    if mapping["VMP_SNOMED_CODE"].duplicated().any():
+        raise ValueError("VEN mapping must contain at most one row per VMP_SNOMED_CODE")
+    out = out.merge(mapping, on="VMP_SNOMED_CODE", how="left")
+    out["VEN_CLASS"] = out["VEN_CLASS"].fillna("UNCLASSIFIED")
+    return out

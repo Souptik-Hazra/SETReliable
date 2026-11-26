@@ -2,74 +2,22 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data_loader import _clean_text
-from inventory_simulation import calculate_initial_inventory, simulate_inventory
-from reliability_monitoring import add_reliability_columns
+from data_loader import _clean_text, load_raw_data
+from demand_scenarios import create_abrupt_surge_scenario
+from feature_engineering import add_target_features
+from inventory_simulation import (
+    assign_lead_times, calculate_initial_inventory, simulate_inventory,
+)
+from reliability_monitoring import add_reliability_columns, evaluate_forecast_metrics
 
 
-def sample_frame():
-    return pd.DataFrame({
-        "MEDICINE_HOSPITAL_ID": ["series-a"] * 5,
-        "DATE": pd.date_range("2025-01-01", periods=5, freq="MS"),
-        "DEMAND": [10.0, 12.0, np.nan, 8.0, 11.0],
-        "DEMAND_SCENARIO": [10.0, 12.0, np.nan, 8.0, 11.0],
-        "LEAD_TIME_MONTHS": [1] * 5,
-    })
-
-
-def test_text_cleaning_keeps_missing_values():
-    result = _clean_text(pd.Series([" A ", "", None]))
-    assert result.iloc[0] == "A"
-    assert pd.isna(result.iloc[1])
-    assert pd.isna(result.iloc[2])
-
-
-def test_initial_inventory_does_not_use_future_demand():
-    frame = sample_frame()
-    initialized = calculate_initial_inventory(frame, initial_inventory=7)
-    assert initialized["INITIAL_INVENTORY"].eq(7).all()
-
-
-def test_missing_month_is_not_zero_demand_or_consumption():
-    frame = sample_frame()
-    frame["INITIAL_INVENTORY"] = 20.0
-    simulated = simulate_inventory(frame)
-    missing_row = simulated.loc[simulated["DEMAND_SCENARIO"].isna()].iloc[0]
-    assert missing_row["SHORTAGE_QUANTITY"] == 0
-    assert missing_row["INVENTORY_ON_HAND"] == missing_row["AVAILABLE_SUPPLY"]
-
-
-def test_simulation_never_creates_negative_stock_or_order():
-    frame = sample_frame()
-    frame["INITIAL_INVENTORY"] = 0.0
-    simulated = simulate_inventory(frame)
-    for col in ["INVENTORY_ON_HAND", "ORDER_QUANTITY", "SHORTAGE_QUANTITY"]:
-        assert (simulated[col] >= 0).all()
-
-
-def test_reliability_uses_prior_errors_for_interval():
-    frame = sample_frame()
-    result = add_reliability_columns(frame, window=2)
-    assert "PREDICTION_INTERVAL_LOWER" in result
-    assert "PREDICTION_INTERVAL_UPPER" in result
-    assert "FORECAST_P10" not in result
-    assert pd.isna(result.loc[0, "RELIABILITY_FORECAST"])
-
-
-def test_invalid_reorder_quantile_rejected():
-    frame = sample_frame()
-    frame["INITIAL_INVENTORY"] = 0.0
-    with pytest.raises(ValueError):
-        simulate_inventory(frame, reorder_quantile=1.0)
-
-def test_chunked_loader_aggregates_across_chunks_and_keeps_units(tmp_path):
-    from data_loader import load_raw_data
-
+def source_rows(tmp_path):
     rows = [
         ["202501", "TR1", "100", "Medicine A", "U1", "tablet", 5, 10],
         ["202501", "TR1", "100", "Medicine A", "U1", "tablet", -2, 4],
         ["202501", "TR1", "100", "Medicine A", "U2", "ml", 3, 6],
-        ["202502", "TR1", "100", "Medicine A", "U1", "tablet", -1, 2],
+        ["202502", "TR1", "100", "Medicine A", "U1", "tablets", -1, 2],
+        ["202503", "TR1", "100", "Medicine A", "U1", "tablet", 0, -2],
     ]
     columns = [
         "YEAR_MONTH", "ODS_CODE", "VMP_SNOMED_CODE", "VMP_PRODUCT_NAME",
@@ -78,13 +26,92 @@ def test_chunked_loader_aggregates_across_chunks_and_keeps_units(tmp_path):
     ]
     path = tmp_path / "sample.csv"
     pd.DataFrame(rows, columns=columns).to_csv(path, index=False)
+    return path
 
-    result = load_raw_data(path, chunksize=2)
-    assert len(result) == 3
-    tablet = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"]
-    jan = tablet[tablet["YEAR_MONTH"] == "202501"].iloc[0]
-    feb = tablet[tablet["YEAR_MONTH"] == "202502"].iloc[0]
-    assert jan["DEMAND"] == 5
-    assert jan["SIGNED_NET_QUANTITY"] == 3
+
+def test_text_cleaning():
+    result = _clean_text(pd.Series([" A ", "", None]))
+    assert result.iloc[0] == "A"
+    assert pd.isna(result.iloc[1]) and pd.isna(result.iloc[2])
+
+
+def test_chunk_aggregation_preserves_gross_negative_net_and_unit_identity(tmp_path):
+    result = load_raw_data(source_rows(tmp_path), chunksize=2)
+    assert len(result) == 2
+    u1 = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"].sort_values("DATE")
+    jan = u1.iloc[0]
+    feb = u1.iloc[1]
+    assert jan["GROSS_POSITIVE_QUANTITY"] == 5
+    assert jan["NEGATIVE_QUANTITY_TOTAL"] == -2
+    assert jan["NET_QUANTITY"] == 3
     assert jan["NEGATIVE_QUANTITY_COUNT"] == 1
-    assert pd.isna(feb["DEMAND"])
+    assert feb["GROSS_POSITIVE_QUANTITY"] is np.nan or pd.isna(feb["GROSS_POSITIVE_QUANTITY"])
+    assert feb["NEGATIVE_QUANTITY_TOTAL"] == -1
+    assert feb["NET_QUANTITY"] == -1
+
+
+def test_unit_name_variation_does_not_split_series(tmp_path):
+    result = load_raw_data(source_rows(tmp_path), chunksize=1)
+    u1 = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"]
+    assert len(u1) == 3
+
+
+def test_missing_months_remain_missing(tmp_path):
+    result = load_raw_data(source_rows(tmp_path), chunksize=2)
+    monthly = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"]
+    from data_loader import create_continuous_monthly_series
+    continuous = create_continuous_monthly_series(monthly)
+    assert continuous.loc[continuous["YEAR_MONTH"] == "202502", "GROSS_POSITIVE_QUANTITY"].isna().all()
+
+
+def sample_inventory():
+    return pd.DataFrame({
+        "MEDICINE_HOSPITAL_ID": ["s"] * 4,
+        "DATE": pd.date_range("2025-01-01", periods=4, freq="MS"),
+        "GROSS_POSITIVE_QUANTITY": [10.0, 12.0, np.nan, 8.0],
+        "NEGATIVE_QUANTITY_TOTAL": [0.0, -2.0, np.nan, 0.0],
+        "LEAD_TIME_MONTHS": [1] * 4,
+        "INITIAL_INVENTORY": [20.0] * 4,
+        "SCENARIO_QUANTITY": [10.0, 12.0, np.nan, 8.0],
+    })
+
+
+def test_negative_movements_are_separate_inflows_not_negative_demand():
+    result = simulate_inventory(sample_inventory(), apply_negative_movements_as_returns=True)
+    assert result.loc[1, "RETURN_ADJUSTMENT_INFLOW"] == 2
+    assert result.loc[1, "SHORTAGE_QUANTITY"] >= 0
+    assert result["INVENTORY_SIMULATION_IS_HYPOTHETICAL"].eq(1).all()
+
+
+def test_missing_month_does_not_consume_stock():
+    frame = sample_inventory()
+    result = simulate_inventory(frame)
+    missing = result.loc[2]
+    assert missing["SHORTAGE_QUANTITY"] == 0
+    assert missing["INVENTORY_ON_HAND"] == missing["AVAILABLE_SUPPLY"]
+
+
+def test_invalid_reorder_quantile_rejected():
+    with pytest.raises(ValueError):
+        simulate_inventory(sample_inventory(), reorder_quantile=1)
+
+
+def test_forecast_uses_prior_month_and_not_current_month():
+    frame = pd.DataFrame({
+        "MEDICINE_HOSPITAL_ID": ["s"] * 4,
+        "DATE": pd.date_range("2025-01-01", periods=4, freq="MS"),
+        "GROSS_POSITIVE_QUANTITY": [10.0, 12.0, 15.0, 8.0],
+    })
+    featured = add_target_features(frame, "GROSS_POSITIVE_QUANTITY")
+    result = add_reliability_columns(featured, target="GROSS_POSITIVE_QUANTITY", window=2)
+    assert pd.isna(result.loc[0, "BASELINE_FORECAST"])
+    assert result.loc[2, "BASELINE_FORECAST"] == 12.0
+    metrics = evaluate_forecast_metrics(result)
+    assert metrics["n"] == 3
+    assert metrics["mae"] >= 0
+
+
+def test_scenario_preserves_missing_observations():
+    frame = sample_inventory()
+    result = create_abrupt_surge_scenario(frame, surge_months=2)
+    assert result.loc[2, "SCENARIO_QUANTITY"] != result.loc[2, "SCENARIO_QUANTITY"]

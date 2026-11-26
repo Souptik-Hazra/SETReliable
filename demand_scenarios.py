@@ -1,77 +1,70 @@
 import numpy as np
 
-
 GROUP = "MEDICINE_HOSPITAL_ID"
 
 
-def create_stable_scenario(df):
-    out = df.copy()
-    out["SCENARIO_ID"] = "STABLE"
-    out["DEMAND_REGIME"] = "STABLE"
-    out["DEMAND_SCENARIO"] = out["DEMAND"]
+def _prepare(df, target, scenario_id):
+    if target not in df:
+        raise ValueError(f"Target column not found: {target}")
+    out = df.sort_values([GROUP, "DATE"]).copy()
+    out["SCENARIO_TARGET"] = target
+    out["SCENARIO_QUANTITY"] = out[target]
+    out["SCENARIO_ID"] = scenario_id
+    out["SCENARIO_MODIFIED"] = 0
     return out
 
 
-def _eligible_indexes(group, min_history):
-    observed = group["DEMAND"].notna()
-    if int(observed.sum()) < min_history:
-        return []
-    return list(group.index)
+def create_stable_scenario(df, target="GROSS_POSITIVE_QUANTITY"):
+    return _prepare(df, target, f"STABLE_{target}")
 
 
-def create_abrupt_surge_scenario(df, surge_factor=2.0, surge_months=3):
-    out = df.sort_values([GROUP, "DATE"]).copy()
-    out["DEMAND_SCENARIO"] = out["DEMAND"]
-    out["SCENARIO_ID"] = f"ABRUPT_SURGE_{surge_factor}"
-    out["DEMAND_REGIME"] = "STABLE"
+def create_abrupt_surge_scenario(df, target="GROSS_POSITIVE_QUANTITY",
+                                 surge_factor=2.0, surge_months=3):
+    if surge_factor < 0 or surge_months < 1:
+        raise ValueError("Surge factor must be non-negative and months must be positive")
+    out = _prepare(df, target, f"ABRUPT_SURGE_{target}_{surge_factor}")
     for _, group in out.groupby(GROUP, sort=False):
-        indexes = _eligible_indexes(group, surge_months + 6)
-        if not indexes:
+        observed = group.index[group["SCENARIO_QUANTITY"].notna()]
+        if len(observed) < surge_months + 6:
             continue
-        start = int(len(indexes) * 0.60)
-        selected = indexes[start:start + surge_months]
-        out.loc[selected, "DEMAND_SCENARIO"] = (
-            out.loc[selected, "DEMAND"] * surge_factor
-        )
-        out.loc[selected, "DEMAND_REGIME"] = "ABRUPT_SURGE"
+        start = int(len(observed) * 0.60)
+        selected = observed[start:start + surge_months]
+        out.loc[selected, "SCENARIO_QUANTITY"] *= surge_factor
+        out.loc[selected, "SCENARIO_MODIFIED"] = 1
     return out
 
 
-def create_gradual_drift_scenario(df, total_increase=0.50, drift_months=6):
-    out = df.sort_values([GROUP, "DATE"]).copy()
-    out["DEMAND_SCENARIO"] = out["DEMAND"]
-    out["SCENARIO_ID"] = f"GRADUAL_DRIFT_{total_increase}"
-    out["DEMAND_REGIME"] = "STABLE"
+def create_gradual_drift_scenario(df, target="GROSS_POSITIVE_QUANTITY",
+                                  total_increase=0.50, drift_months=6):
+    if total_increase < -1 or drift_months < 1:
+        raise ValueError("Increase must be >= -1 and months must be positive")
+    out = _prepare(df, target, f"GRADUAL_DRIFT_{target}_{total_increase}")
     for _, group in out.groupby(GROUP, sort=False):
-        indexes = _eligible_indexes(group, drift_months + 6)
-        if not indexes:
+        observed = group.index[group["SCENARIO_QUANTITY"].notna()]
+        if len(observed) < drift_months + 6:
             continue
-        start = int(len(indexes) * 0.60)
-        selected = indexes[start:start + drift_months]
+        selected = observed[int(len(observed) * 0.60):][:drift_months]
         factors = np.linspace(1.0, 1.0 + total_increase, len(selected))
-        out.loc[selected, "DEMAND_SCENARIO"] = (
-            out.loc[selected, "DEMAND"].to_numpy() * factors
-        )
-        out.loc[selected, "DEMAND_REGIME"] = "GRADUAL_DRIFT"
+        out.loc[selected, "SCENARIO_QUANTITY"] *= factors
+        out.loc[selected, "SCENARIO_MODIFIED"] = 1
     return out
 
 
-def create_volatility_scenario(df, volatility_multiplier=2.0):
-    out = df.sort_values([GROUP, "DATE"]).copy()
-    out["DEMAND_SCENARIO"] = out["DEMAND"]
-    out["SCENARIO_ID"] = f"VOLATILITY_{volatility_multiplier}"
-    out["DEMAND_REGIME"] = "STABLE"
+def create_volatility_scenario(df, target="GROSS_POSITIVE_QUANTITY",
+                               volatility_multiplier=2.0):
+    if volatility_multiplier < 0:
+        raise ValueError("Volatility multiplier must be non-negative")
+    out = _prepare(df, target, f"VOLATILITY_{target}_{volatility_multiplier}")
     for _, group in out.groupby(GROUP, sort=False):
-        observed = group["DEMAND"].dropna()
+        observed = group["SCENARIO_QUANTITY"].dropna()
         if len(observed) < 12:
             continue
-        start = int(len(group) * 0.60)
-        selected = group.index[start:]
-        baseline = group.loc[selected, "DEMAND"].mean()
-        if not np.isfinite(baseline):
-            continue
-        values = group.loc[selected, "DEMAND"]
-        modified = baseline + volatility_multiplier * (values - baseline)
-        out.loc[selected, "DEMAND_SCENARIO"] = modified.clip(lower=0)
-        out.loc[selected, "DEMAND_REGIME"] = "VOLATILITY_INCREASE"
+        selected = group.index[int(len(group) * 0.60):]
+        values = out.loc[selected, "SCENARIO_QUANTITY"]
+        baseline = values.mean()
+        if np.isfinite(baseline):
+            out.loc[selected, "SCENARIO_QUANTITY"] = (
+                baseline + volatility_multiplier * (values - baseline)
+            ).clip(lower=0)
+            out.loc[selected, "SCENARIO_MODIFIED"] = out.loc[selected, "SCENARIO_QUANTITY"].notna().astype("int8")
     return out
