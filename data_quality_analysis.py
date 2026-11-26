@@ -1,60 +1,80 @@
-"""Chunked SCMD quality audit, including disk-backed global duplicate checks."""
-import hashlib
-import sqlite3
+"""Disk-backed SCMD data-quality audit using DuckDB global aggregations."""
 from pathlib import Path
+import duckdb
 import pandas as pd
-from config import INPUT_FILE, CHUNK_SIZE
+
+from config import INPUT_FILE
 from data_loader import REQUIRED_COLUMNS
 
 
-def audit(path=INPUT_FILE, chunksize=CHUNK_SIZE, sqlite_path=None):
-    db_path = Path(sqlite_path) if sqlite_path else Path(".scmd_quality_audit.sqlite")
-    if db_path.exists():
-        db_path.unlink()
-    conn = sqlite3.connect(db_path)
-    conn.execute("CREATE TABLE hashes (hash TEXT PRIMARY KEY)")
-    conn.execute("""CREATE TABLE keys (
-        year_month TEXT, ods TEXT, vmp TEXT, unit_id TEXT,
-        PRIMARY KEY(year_month, ods, vmp, unit_id))""")
-    summary = {"rows": 0, "missing_cost": 0, "negative_quantity": 0,
-               "zero_quantity": 0, "negative_cost": 0, "invalid_quantity": 0,
-               "invalid_month": 0, "exact_duplicate_rows": 0,
-               "duplicate_series_month_keys": 0}
+def audit(path=INPUT_FILE, chunksize=None, memory_limit="4GB", temp_directory=None):
+    """Audit exact duplicate rows and duplicate series-month keys out of core.
+
+    DuckDB groups directly over the CSV and spills intermediate state to disk.
+    No Python loop or one-row-at-a-time database insert is used.
+    """
+    missing = sorted(set(REQUIRED_COLUMNS) - set(pd.read_csv(path, nrows=0).columns))
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+    source = str(path).replace("'", "''")
+    conn = duckdb.connect(database=":memory:")
     try:
-        for chunk in pd.read_csv(path, dtype="string", chunksize=chunksize, low_memory=False):
-            missing = set(REQUIRED_COLUMNS) - set(chunk.columns)
-            if missing:
-                raise ValueError(f"Missing required columns: {sorted(missing)}")
-            summary["rows"] += len(chunk)
-            q = pd.to_numeric(chunk["TOTAL_QUANITY_IN_VMP_UNIT"], errors="coerce")
-            c = pd.to_numeric(chunk["INDICATIVE_COST"], errors="coerce")
-            summary["missing_cost"] += int(c.isna().sum())
-            summary["negative_quantity"] += int((q < 0).sum())
-            summary["zero_quantity"] += int((q == 0).sum())
-            summary["negative_cost"] += int((c < 0).sum())
-            summary["invalid_quantity"] += int(q.isna().sum())
-            valid_month = pd.to_datetime(chunk["YEAR_MONTH"], format="%Y%m", errors="coerce")
-            summary["invalid_month"] += int(valid_month.isna().sum())
-            for row in chunk.itertuples(index=False, name=None):
-                raw = "\x1f".join("" if pd.isna(v) else str(v) for v in row)
-                digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-                cur = conn.execute("INSERT OR IGNORE INTO hashes VALUES (?)", (digest,))
-                if cur.rowcount == 0:
-                    summary["exact_duplicate_rows"] += 1
-            keys = chunk[["YEAR_MONTH", "ODS_CODE", "VMP_SNOMED_CODE",
-                          "UNIT_OF_MEASURE_IDENTIFIER"]].dropna(
-                              subset=["YEAR_MONTH", "ODS_CODE", "VMP_SNOMED_CODE"])
-            for row in keys.itertuples(index=False, name=None):
-                cur = conn.execute("INSERT OR IGNORE INTO keys VALUES (?,?,?,?)",
-                                   tuple(str(v) for v in row))
-                if cur.rowcount == 0:
-                    summary["duplicate_series_month_keys"] += 1
-            conn.commit()
+        conn.execute(f"SET memory_limit = '{memory_limit}'")
+        if temp_directory:
+            directory = str(Path(temp_directory).resolve()).replace("'", "''")
+            conn.execute(f"SET temp_directory = '{directory}'")
+        conn.execute(f"""
+            CREATE TEMP VIEW scmd_source AS
+            SELECT * FROM read_csv_auto('{source}', all_varchar=true, header=true)
+        """)
+        numeric = conn.execute("""
+            SELECT
+                count(*) AS rows,
+                count(*) FILTER (WHERE try_cast(INDICATIVE_COST AS DOUBLE) IS NULL) AS missing_cost,
+                count(*) FILTER (WHERE try_cast(TOTAL_QUANITY_IN_VMP_UNIT AS DOUBLE) < 0) AS negative_quantity,
+                count(*) FILTER (WHERE try_cast(TOTAL_QUANITY_IN_VMP_UNIT AS DOUBLE) = 0) AS zero_quantity,
+                count(*) FILTER (WHERE try_cast(INDICATIVE_COST AS DOUBLE) < 0) AS negative_cost,
+                count(*) FILTER (WHERE try_cast(TOTAL_QUANITY_IN_VMP_UNIT AS DOUBLE) IS NULL) AS invalid_quantity,
+                count(*) FILTER (WHERE try_strptime(trim(YEAR_MONTH), '%Y%m') IS NULL) AS invalid_month
+            FROM scmd_source
+        """).df().iloc[0].to_dict()
+        duplicates = conn.execute("""
+            SELECT
+                coalesce(sum(row_count - 1), 0) AS exact_duplicate_rows
+            FROM (
+                SELECT count(*) AS row_count
+                FROM scmd_source
+                GROUP BY ALL
+                HAVING count(*) > 1
+            )
+        """).df().iloc[0].to_dict()
+        series_duplicates = conn.execute("""
+            SELECT coalesce(sum(row_count - 1), 0) AS duplicate_series_month_keys
+            FROM (
+                SELECT count(*) AS row_count
+                FROM (
+                    SELECT
+                        trim(YEAR_MONTH) AS YEAR_MONTH,
+                        nullif(trim(ODS_CODE), '') AS ODS_CODE,
+                        nullif(trim(VMP_SNOMED_CODE), '') AS VMP_SNOMED_CODE,
+                        coalesce(nullif(trim(UNIT_OF_MEASURE_IDENTIFIER), ''),
+                                 'UNKNOWN_UNIT_ID') AS UNIT_ID
+                    FROM scmd_source
+                    WHERE try_strptime(trim(YEAR_MONTH), '%Y%m') IS NOT NULL
+                      AND nullif(trim(ODS_CODE), '') IS NOT NULL
+                      AND nullif(trim(VMP_SNOMED_CODE), '') IS NOT NULL
+                )
+                GROUP BY YEAR_MONTH, ODS_CODE, VMP_SNOMED_CODE, UNIT_ID
+                HAVING count(*) > 1
+            )
+        """).df().iloc[0].to_dict()
+        return {
+            **{key: int(value) for key, value in numeric.items()},
+            **{key: int(value) for key, value in duplicates.items()},
+            **{key: int(value) for key, value in series_duplicates.items()},
+        }
     finally:
         conn.close()
-        if sqlite_path is None and db_path.exists():
-            db_path.unlink()
-    return summary
 
 
 if __name__ == "__main__":

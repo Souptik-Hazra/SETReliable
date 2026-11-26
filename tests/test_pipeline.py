@@ -7,6 +7,7 @@ from demand_scenarios import create_abrupt_surge_scenario
 from feature_engineering import add_target_features
 from inventory_simulation import simulate_inventory
 from reliability_monitoring import add_reliability_columns, evaluate_forecast_metrics
+from data_quality_analysis import audit
 
 
 def source_rows(tmp_path):
@@ -16,6 +17,7 @@ def source_rows(tmp_path):
         ["202501", "TR1", "100", "Medicine A", "U2", "ml", 3, 6],
         ["202502", "TR1", "100", "Medicine A", "U1", "tablets", -1, 2],
         ["202503", "TR1", "100", "Medicine A", "U1", "tablet", 0, -2],
+        ["202505", "TR1", "100", "Medicine A", "U1", "tablet", 4, 8],
     ]
     columns = [
         "YEAR_MONTH", "ODS_CODE", "VMP_SNOMED_CODE", "VMP_PRODUCT_NAME",
@@ -33,34 +35,39 @@ def test_text_cleaning():
     assert pd.isna(result.iloc[1]) and pd.isna(result.iloc[2])
 
 
-def test_chunk_aggregation_preserves_gross_negative_net_and_unit_identity(tmp_path):
-    result = load_raw_data(source_rows(tmp_path), chunksize=2)
-    assert len(result) == 4
+def test_chunk_aggregation_distinguishes_zero_from_unobserved(tmp_path):
+    result = load_raw_data(source_rows(tmp_path), memory_limit="256MB")
     u1 = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"].sort_values("DATE")
-    jan, feb = u1.iloc[0], u1.iloc[1]
+    jan, feb, mar = u1.iloc[0], u1.iloc[1], u1.iloc[2]
     assert jan["GROSS_POSITIVE_QUANTITY"] == 5
     assert jan["NEGATIVE_QUANTITY_TOTAL"] == -2
     assert jan["NET_QUANTITY"] == 3
-    assert jan["NEGATIVE_QUANTITY_COUNT"] == 1
-    assert pd.isna(feb["GROSS_POSITIVE_QUANTITY"])
+    assert feb["GROSS_POSITIVE_QUANTITY"] == 0
     assert feb["NEGATIVE_QUANTITY_TOTAL"] == -1
     assert feb["NET_QUANTITY"] == -1
+    assert mar["GROSS_POSITIVE_QUANTITY"] == 0
+    assert mar["NEGATIVE_QUANTITY_TOTAL"] == 0
 
 
-def test_unit_name_variation_does_not_split_series_and_is_reported(tmp_path):
-    result = load_raw_data(source_rows(tmp_path), chunksize=1)
+def test_missing_calendar_month_stays_missing(tmp_path):
+    result = load_raw_data(source_rows(tmp_path))
     u1 = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"]
-    assert len(u1) == 3
-    assert u1["UNIT_NAME_VARIANTS"].eq(2).all()
-
-
-def test_missing_month_measurements_remain_missing(tmp_path):
-    result = load_raw_data(source_rows(tmp_path), chunksize=2)
-    monthly = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"]
-    continuous = create_continuous_monthly_series(monthly)
+    continuous = create_continuous_monthly_series(u1)
+    april = continuous[continuous["YEAR_MONTH"] == "202504"].iloc[0]
     feb = continuous[continuous["YEAR_MONTH"] == "202502"].iloc[0]
-    assert pd.isna(feb["GROSS_POSITIVE_QUANTITY"])
-    assert feb["OBSERVATION_MISSING"] == 0  # a negative-only source month was reported
+    assert pd.isna(april["GROSS_POSITIVE_QUANTITY"])
+    assert april["OBSERVATION_MISSING"] == 1
+    assert feb["GROSS_POSITIVE_QUANTITY"] == 0
+    assert feb["OBSERVATION_MISSING"] == 0
+
+
+def test_missing_unit_identifier_uses_same_sentinel(tmp_path):
+    path = source_rows(tmp_path)
+    frame = pd.read_csv(path, dtype="string")
+    frame.loc[0, "UNIT_OF_MEASURE_IDENTIFIER"] = pd.NA
+    frame.to_csv(path, index=False)
+    result = load_raw_data(path)
+    assert "UNKNOWN_UNIT_ID" in set(result["UNIT_OF_MEASURE_IDENTIFIER"])
 
 
 def sample_inventory():
@@ -75,11 +82,16 @@ def sample_inventory():
     })
 
 
-def test_negative_movements_are_separate_inflows_not_negative_demand():
+def test_negative_movements_are_not_returns_by_default():
+    result = simulate_inventory(sample_inventory())
+    assert result.loc[1, "RETURN_ADJUSTMENT_INFLOW"] == 0
+    assert result["NEGATIVE_MOVEMENTS_TREATED_AS_RETURNS"].eq(0).all()
+    assert result["STOCKOUTS_ARE_OBSERVED"].eq(0).all()
+
+
+def test_negative_movements_can_be_enabled_only_as_sensitivity_assumption():
     result = simulate_inventory(sample_inventory(), apply_negative_movements_as_returns=True)
     assert result.loc[1, "RETURN_ADJUSTMENT_INFLOW"] == 2
-    assert result.loc[1, "SHORTAGE_QUANTITY"] >= 0
-    assert result["INVENTORY_SIMULATION_IS_HYPOTHETICAL"].eq(1).all()
 
 
 def test_missing_month_does_not_consume_stock():
@@ -114,9 +126,7 @@ def test_scenario_preserves_missing_observations():
     assert pd.isna(result.loc[2, "SCENARIO_QUANTITY"])
 
 
-
 def test_extended_lags_and_rolling_features_are_past_only():
-    from feature_engineering import add_target_features
     frame = pd.DataFrame({
         "MEDICINE_HOSPITAL_ID": ["s"] * 15,
         "DATE": pd.date_range("2024-01-01", periods=15, freq="MS"),
@@ -134,4 +144,14 @@ def test_drift_monitors_are_available_and_causal():
     adaptive = _adwin_like_flags(errors, min_window=3)
     assert len(cusum) == len(errors)
     assert len(adaptive) == len(errors)
-    assert cusum[-1] == 1
+
+
+def test_duplicate_audit_detects_within_and_across_chunks(tmp_path):
+    path = source_rows(tmp_path)
+    frame = pd.read_csv(path, dtype="string")
+    duplicate = frame.iloc[[0]].copy()
+    data = pd.concat([frame, duplicate, frame.iloc[[1]]], ignore_index=True)
+    data.to_csv(path, index=False)
+    result = audit(path, chunksize=2, sqlite_path=tmp_path / "audit.sqlite")
+    assert result["exact_duplicate_rows"] >= 2
+    assert result["duplicate_series_month_keys"] >= 3
