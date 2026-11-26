@@ -40,7 +40,7 @@ def add_rolling_features(df, window=3):
 def add_intermittent_flag(df, zero_threshold=0.30):
     df = df.copy()
     summary = df.groupby(GROUP)["DEMAND"].agg(
-        ZERO_DEMAND_SHARE=lambda x: x.eq(0).mean(),
+        ZERO_DEMAND_SHARE=lambda x: x.eq(0).sum() / max(x.notna().sum(), 1),
         OBSERVED_MONTHS="count",
     ).reset_index()
     summary["IS_INTERMITTENT"] = (
