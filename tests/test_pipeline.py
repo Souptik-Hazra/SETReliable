@@ -190,6 +190,7 @@ def test_unit_name_audit_is_unit_aware_and_global(tmp_path):
     frame = pd.read_csv(path, dtype="string")
     frame.loc[frame["UNIT_OF_MEASURE_IDENTIFIER"] == "U1", "UNIT_OF_MEASURE_NAME"] = "tablet"
     frame.loc[frame["YEAR_MONTH"] == "202502", "UNIT_OF_MEASURE_NAME"] = "tablets"
+    frame["ODS_CODE"] = " " + frame["ODS_CODE"] + " "
     frame.to_csv(path, index=False)
     result = analyze(path, chunksize=2)
     u1 = result[result["UNIT_OF_MEASURE_IDENTIFIER"] == "U1"].iloc[0]

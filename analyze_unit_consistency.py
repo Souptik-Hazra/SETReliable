@@ -27,18 +27,25 @@ def analyze(path=INPUT_FILE, chunksize=None, memory_limit="4GB", temp_directory=
             directory = str(Path(temp_directory).resolve()).replace("'", "''")
             conn.execute(f"SET temp_directory = '{directory}'")
         result = conn.execute(f"""
+            WITH cleaned AS (
+                SELECT
+                    nullif(trim(ODS_CODE), '') AS ODS_CODE,
+                    nullif(trim(VMP_SNOMED_CODE), '') AS VMP_SNOMED_CODE,
+                    coalesce(nullif(trim(UNIT_OF_MEASURE_IDENTIFIER), ''),
+                             'UNKNOWN_UNIT_ID') AS UNIT_OF_MEASURE_IDENTIFIER,
+                    nullif(trim(VMP_PRODUCT_NAME), '') AS VMP_PRODUCT_NAME,
+                    nullif(trim(UNIT_OF_MEASURE_NAME), '') AS UNIT_OF_MEASURE_NAME
+                FROM read_csv_auto('{source}', all_varchar=true, header=true)
+            )
             SELECT
-                nullif(trim(ODS_CODE), '') AS ODS_CODE,
-                nullif(trim(VMP_SNOMED_CODE), '') AS VMP_SNOMED_CODE,
-                coalesce(nullif(trim(UNIT_OF_MEASURE_IDENTIFIER), ''),
-                         'UNKNOWN_UNIT_ID') AS UNIT_OF_MEASURE_IDENTIFIER,
-                first(nullif(trim(VMP_PRODUCT_NAME), '')) AS VMP_PRODUCT_NAME,
-                list_sort(list_distinct(list(nullif(trim(UNIT_OF_MEASURE_NAME), ''))
-                    FILTER (WHERE nullif(trim(UNIT_OF_MEASURE_NAME), '') IS NOT NULL)))
-                    AS UNIT_NAMES
-            FROM read_csv_auto('{source}', all_varchar=true, header=true)
-            WHERE nullif(trim(ODS_CODE), '') IS NOT NULL
-              AND nullif(trim(VMP_SNOMED_CODE), '') IS NOT NULL
+                ODS_CODE,
+                VMP_SNOMED_CODE,
+                UNIT_OF_MEASURE_IDENTIFIER,
+                first(VMP_PRODUCT_NAME) AS VMP_PRODUCT_NAME,
+                list_sort(list_distinct(list(UNIT_OF_MEASURE_NAME)
+                    FILTER (WHERE UNIT_OF_MEASURE_NAME IS NOT NULL))) AS UNIT_NAMES
+            FROM cleaned
+            WHERE ODS_CODE IS NOT NULL AND VMP_SNOMED_CODE IS NOT NULL
             GROUP BY ODS_CODE, VMP_SNOMED_CODE, UNIT_OF_MEASURE_IDENTIFIER
         """).df()
 
